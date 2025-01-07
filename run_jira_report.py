@@ -11,7 +11,7 @@ from logging.handlers import SysLogHandler
 from email.message import EmailMessage
 from datetime import datetime
 from openpyxl import load_workbook
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side, GradientFill
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="Generate a Jira report and send it as an attachment")
@@ -68,7 +68,7 @@ def fetch_issues(jql_query):
     params = {
         "jql": jql_query,
         "maxResults": 100,  
-        "fields": "key,summary,comment"
+        "fields": "key,summary,comment, status"
     }
     logger.info(f"Fetching issues with JQL: {jql_query}")
     try:
@@ -135,13 +135,15 @@ def format_excel_file(filename):
 
     epic_header_pattern = re.compile(r'.+\(NOOPT-\d+\)$')
     
+    done_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")  # Pastel green
+    
     current_row = 1
     while current_row <= ws.max_row:
         first_cell = ws[f'A{current_row}']
         cell_value = str(first_cell.value) if first_cell.value else ""
 
         if epic_header_pattern.match(cell_value): 
-            ws.merge_cells(f'A{current_row}:D{current_row}')
+            ws.merge_cells(f'A{current_row}:E{current_row}')
             
             header_cell = ws[f'A{current_row}']
             header_cell.fill = header_fill
@@ -149,15 +151,20 @@ def format_excel_file(filename):
             header_cell.alignment = Alignment(horizontal='left', vertical='center')
             
         elif first_cell.value:
-            for col in ['A', 'B', 'C', 'D']:
+            for col in ['A', 'B', 'C', 'D', 'E']:
                 cell = ws[f'{col}{current_row}']
                 cell.alignment = Alignment(wrap_text=True, vertical='top')
+                
+                if ws[f'C{current_row}'].value == "Done":
+                    for col_to_fill in ['A', 'B', 'C', 'D', 'E']:
+                        ws[f'{col_to_fill}{current_row}'].fill = done_fill
         current_row += 1
     
     ws.column_dimensions['A'].width = 15  # Key column
     ws.column_dimensions['B'].width = 40  # Summary column
-    ws.column_dimensions['C'].width = 25  # Time column
-    ws.column_dimensions['D'].width = 50  # Comment column
+    ws.column_dimensions['C'].width = 20  # Status column
+    ws.column_dimensions['D'].width = 25  # Time column
+    ws.column_dimensions['E'].width = 50  # Comment column
     
     wb.save(filename)
 
@@ -222,12 +229,14 @@ def main():
             for child in child_issues["issues"]:
                 child_key = child["key"]
                 child_summary = child["fields"]["summary"]
+                child_status = child["fields"]["status"]["name"]
                 most_recent_comment, comment_date = fetch_most_recent_comment(child_key)
                 data.append({
                     "Epic Key": epic_key,
                     "Epic Summary": epic_summary,
                     "Child Key": child_key,
                     "Child Summary": child_summary,
+                    "Child Status": child_status,
                     "Comment Date": comment_date,
                     "Most Recent Comment": most_recent_comment,
                 })
@@ -247,16 +256,27 @@ def main():
     excel_data = []
     for epic_key, group in pd.DataFrame(data).groupby("Epic Key"):
         epic_summary = group.iloc[0]["Epic Summary"]
-        header_row = [f"{epic_summary} ({epic_key})", "", "", ""]
+        header_row = [f"{epic_summary} ({epic_key})", "", "", "", ""]
         excel_data.append(header_row)
+        
+        status_order = {"In Progress": 1, "Waiting": 2, "For approval": 2, "New": 3, "Done": 4}
+        
+        group = group.sort_values(
+            by=["Child Status", "Comment Date"],
+            key=lambda col: col.map(status_order) if col.name == "Child Status" else col,
+            ascending=[True, False]
+        )
+            
         for _, row in group.iterrows():
             excel_data.append([
-                row["Child Key"], 
-                row["Child Summary"], 
+                row["Child Key"],
+                row["Child Summary"],
+                row["Child Status"],
                 row["Comment Date"],
                 row["Most Recent Comment"],
             ])
-        excel_data.append(["", "", "", ""])  # Add a blank row for spacing
+        
+        excel_data.append(["", "", "", "", ""])  # Add a blank row for spacing
     
     # Save to Excel
     timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
