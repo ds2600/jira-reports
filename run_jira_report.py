@@ -17,6 +17,7 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side, Gradient
 parser = argparse.ArgumentParser(description="Generate a Jira report and send it as an attachment")
 parser.add_argument("--email", help="Email address to send the report to")
 parser.add_argument("--debug", action="store_true", help="Output log messages to console")
+parser.add_argument("--plain", action="store_true", help="Outputs non-formatted Excel file")
 args = parser.parse_args()
 
 # Retrieve and build configurations
@@ -117,13 +118,21 @@ def parse_comment(comment_json):
                 for content in block.get("content", []):
                     if content["type"] == "text":
                         text.append(content["text"])
+            elif block["type"] == "listItem":
+                bullet_text = []
+                for content in block.get("content", []):
+                    if content["type"] == "paragraph":
+                        for inner_content in content.get("content", []):
+                            if inner_content["type"] == "text":
+                                bullet_text.append(inner_content["text"])
+                if bullet_text:
+                    text.append(f"- {' '.join(bullet_text)}")
         return "\n".join(text)
     return comment_json  # Return raw JSON if not in expected format
 
 def format_excel_file(filename):
     wb = load_workbook(filename)
     ws = wb.active
-    
     header_fill = PatternFill(start_color='B8CCE4', end_color='B8CCE4', fill_type='solid')  # Light steel blue
     header_font = Font(bold=True, size=11, color='000000')
     header_border = Border(
@@ -132,39 +141,69 @@ def format_excel_file(filename):
         left=Side(style='thin', color='000000'),
         right=Side(style='thin', color='000000')
     )
-
+    
     epic_header_pattern = re.compile(r'.+\(NOOPT-\d+\)$')
     
     done_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")  # Pastel green
     
     current_row = 1
+    logger.info("Formatting rows")
     while current_row <= ws.max_row:
         first_cell = ws[f'A{current_row}']
         cell_value = str(first_cell.value) if first_cell.value else ""
+        row_key = str(ws[f'B{current_row}'].value)
 
         if epic_header_pattern.match(cell_value): 
-            ws.merge_cells(f'A{current_row}:E{current_row}')
+            logger.info(f'Found header row: {current_row}')
+            ws.merge_cells(f'A{current_row}:F{current_row}')
             
             header_cell = ws[f'A{current_row}']
             header_cell.fill = header_fill
             header_cell.font = header_font
             header_cell.alignment = Alignment(horizontal='left', vertical='center')
             
-        elif first_cell.value:
-            for col in ['A', 'B', 'C', 'D', 'E']:
+        else:
+            if ws[f'G{current_row}'].value is not None:
+                indent_level = int(ws[f'G{current_row}'].value)
+            else:
+                indent_level = 1
+                row_key = ""
+
+            logger.debug(f'Indent level: {indent_level} Row: {current_row}')
+            if indent_level == 0:  # Task
+                logger.info(f'Task row: {current_row}')
+                ws.merge_cells(f'A{current_row}:B{current_row}')
+                task_cell = ws[f'A{current_row}']
+                task_cell.value = row_key
+                task_cell.alignment = Alignment(horizontal='left', vertical='center')
+            else:  # Sub-Task
+                logger.info(f'Sub-Task row: {current_row}')
+                spacer_cell = ws[f'A{current_row}']
+                spacer_cell.value = ""
+                sub_task_cell = ws[f'B{current_row}']
+                sub_task_cell.value = row_key
+                sub_task_cell.alignment = Alignment(horizontal='left', vertical='center')
+            
+            for col in ['C', 'D', 'E', 'F']:
                 cell = ws[f'{col}{current_row}']
-                cell.alignment = Alignment(wrap_text=True, vertical='top')
+                cell.alignment = Alignment(
+                    wrap_text=True, 
+                    vertical='top',
+                    horizontal='left',
+                    indent=indent_level
+                )
                 
-                if ws[f'C{current_row}'].value == "Done":
-                    for col_to_fill in ['A', 'B', 'C', 'D', 'E']:
+                if ws[f'D{current_row}'].value and ws[f'D{current_row}'].value.strip() == "Done":
+                    for col_to_fill in ['A', 'B', 'C', 'D', 'E', 'F']:
                         ws[f'{col_to_fill}{current_row}'].fill = done_fill
         current_row += 1
     
-    ws.column_dimensions['A'].width = 15  # Key column
-    ws.column_dimensions['B'].width = 40  # Summary column
-    ws.column_dimensions['C'].width = 20  # Status column
-    ws.column_dimensions['D'].width = 25  # Time column
-    ws.column_dimensions['E'].width = 50  # Comment column
+    ws.column_dimensions['A'].width = 5  # Spacer column
+    ws.column_dimensions['B'].width = 15  # Key column
+    ws.column_dimensions['C'].width = 40  # Summary column
+    ws.column_dimensions['D'].width = 20  # Status column
+    ws.column_dimensions['E'].width = 25  # Comment Date column
+    ws.column_dimensions['F'].width = 150  # Comment column
     
     wb.save(filename)
 
@@ -225,12 +264,30 @@ def main():
         logger.info(f"Processing Epic: {epic_key} - {epic_summary}")
         print("*", end="", flush=True)
         child_issues = fetch_issues(f'"Epic Link" = {epic_key}')
+        
         if child_issues["issues"]:
             for child in child_issues["issues"]:
                 child_key = child["key"]
                 child_summary = child["fields"]["summary"]
                 child_status = child["fields"]["status"]["name"]
+                
                 most_recent_comment, comment_date = fetch_most_recent_comment(child_key)
+                
+                if child_status == "Done":
+                    done_task = {
+                        "Epic Key": epic_key,
+                        "Epic Summary": epic_summary,
+                        "Child Key": child_key,
+                        "Child Summary": child_summary,
+                        "Child Status": child_status,
+                        "Comment Date": comment_date,
+                        "Most Recent Comment": most_recent_comment,
+                        "Type": "Task",
+                        "Indent": 0,
+                    }
+                    data.append(done_task)
+                    continue 
+
                 data.append({
                     "Epic Key": epic_key,
                     "Epic Summary": epic_summary,
@@ -239,7 +296,33 @@ def main():
                     "Child Status": child_status,
                     "Comment Date": comment_date,
                     "Most Recent Comment": most_recent_comment,
+                    "Type": "Task",
+                    "Indent": 0,
                 })
+                
+                # Subtask handling
+                sub_tasks = fetch_issues(f'"parent" = {child_key}')
+                for sub_task in sub_tasks["issues"]:
+                    sub_key = sub_task["key"]
+                    sub_summary = sub_task["fields"]["summary"]
+                    sub_status = sub_task["fields"]["status"]["name"]
+                    sub_parent = child_key
+                    
+                    sub_comment, sub_comment_date = fetch_most_recent_comment(sub_key)
+                    
+                    data.append({
+                        "Epic Key": epic_key,
+                        "Epic Summary": epic_summary,
+                        "Child Key": sub_key,
+                        "Child Summary": sub_summary,
+                        "Child Status": sub_status,
+                        "Comment Date": sub_comment_date,
+                        "Most Recent Comment": sub_comment,
+                        "Type": "Sub-Task",
+                        "Parent": sub_parent,
+                        "Indent": 1,
+                    })
+               
         else:
             data.append({
                 "Epic Key": epic_key,
@@ -252,41 +335,69 @@ def main():
             
     # Format Excel output
     print("Generating Excel report...")
-    logger.info("Generating Excel report...")
+    logger.info("Generating Excel report")
     excel_data = []
     for epic_key, group in pd.DataFrame(data).groupby("Epic Key"):
         epic_summary = group.iloc[0]["Epic Summary"]
-        header_row = [f"{epic_summary} ({epic_key})", "", "", "", ""]
+        header_row = [f"{epic_summary} ({epic_key})", "", "", "", "", ""]
         excel_data.append(header_row)
         
-        status_order = {"In Progress": 1, "Waiting": 2, "For approval": 2, "New": 3, "Done": 4}
+        status_order = {"In Progress": 1, "Waiting": 2, "For approval": 3, "New": 4, "Done": 5}
         
-        group = group.sort_values(
+        child_issues = group[group["Type"] == "Task"].copy()
+        sub_tasks = group[group["Type"] == "Sub-Task"].copy()
+        logger.debug("Child Issues DataFrame:")
+        logger.debug(child_issues)
+        logger.debug("Sub-Tasks DataFrame:")
+        logger.debug(sub_tasks)
+        
+        logger.info("Sorting rows")
+        child_issues.sort_values(
             by=["Child Status", "Comment Date"],
-            key=lambda col: col.map(status_order) if col.name == "Child Status" else col,
-            ascending=[True, False]
+            key=lambda col: (
+                col.map(status_order).fillna(5) if col.name == "Child Status" else col
+            ),
+            ascending=[True, False],
+            inplace=True
         )
+        
+        sub_tasks.sort_values(
+            by=["Child Key", "Comment Date"],
+            ascending=[True, False],
+            inplace=True
+        )
+        
+        sorted_rows =[]
+        for _, child_row in child_issues.iterrows():
+            sorted_rows.append(child_row.to_dict())
+            child_key = child_row["Child Key"]
+            sub_task_rows = sub_tasks[sub_tasks["Parent"] == child_key]
+            sorted_rows.extend([row.to_dict() for _, row in sub_task_rows.iterrows()])
+            
+        group = pd.DataFrame(sorted_rows)
             
         for _, row in group.iterrows():
             excel_data.append([
+                "",
                 row["Child Key"],
                 row["Child Summary"],
                 row["Child Status"],
                 row["Comment Date"],
                 row["Most Recent Comment"],
+                row.get("Indent", 0),
             ])
         
-        excel_data.append(["", "", "", "", ""])  # Add a blank row for spacing
+        excel_data.append(["", "", "", "", "", "", ""]) #Spacer row
     
     # Save to Excel
     timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
     filename = os.path.join(script_dir, f"jira_report_{timestamp}.xlsx")
     df = pd.DataFrame(excel_data)
     df.to_excel(filename, index=False, header=False)
-
-    print("Applying formatting...")
-    logger.info("Applying formatting...")
-    format_excel_file(filename)
+    if not getattr(args, 'plain', False): 
+        print("Applying formatting...")
+        logger.info("Applying formatting...")
+        format_excel_file(filename)
 
     print(f"Report saved as '{filename}'")
     logger.info(f"Report saved as '{filename}'")
