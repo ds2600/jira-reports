@@ -105,30 +105,46 @@ def fetch_most_recent_comment(issue_key):
             
             return comment_body, formatted_comment_date
         logger.info(f"No comments found for issue {issue_key}")
-        return "No comments", None
+        return " ", None
     except Exception as e:
         logger.error(f"Error fetching comments for {issue_key}: {e}")
         raise
 
 def parse_comment(comment_json):
+    def parse_block(block):
+        """Recursively parse a block of JSON and return its text representation."""
+        if block["type"] == "paragraph":
+            # Parse the content of a paragraph
+            paragraph_text = []
+            for content in block.get("content", []):
+                if content["type"] == "text":
+                    paragraph_text.append(content["text"])
+            return " ".join(paragraph_text)
+        elif block["type"] == "listItem":
+            # Parse a list item
+            bullet_text = []
+            for content in block.get("content", []):
+                if content["type"] == "paragraph":
+                    bullet_text.append(parse_block(content))
+            return f"- {' '.join(bullet_text)}"
+        elif block["type"] == "orderedList" or block["type"] == "bulletList":
+            # Parse ordered or bullet lists
+            list_text = []
+            for item in block.get("content", []):
+                if item["type"] == "listItem":
+                    list_text.append(parse_block(item))
+            return "\n".join(list_text)
+        return ""  # Fallback for unhandled block types
+
     if isinstance(comment_json, dict) and comment_json.get("type") == "doc":
         text = []
         for block in comment_json.get("content", []):
-            if block["type"] == "paragraph":
-                for content in block.get("content", []):
-                    if content["type"] == "text":
-                        text.append(content["text"])
-            elif block["type"] == "listItem":
-                bullet_text = []
-                for content in block.get("content", []):
-                    if content["type"] == "paragraph":
-                        for inner_content in content.get("content", []):
-                            if inner_content["type"] == "text":
-                                bullet_text.append(inner_content["text"])
-                if bullet_text:
-                    text.append(f"- {' '.join(bullet_text)}")
+            parsed_block = parse_block(block)
+            if parsed_block:
+                text.append(parsed_block)
         return "\n".join(text)
-    return comment_json  # Return raw JSON if not in expected format
+    return json.dumps(comment_json, indent=2)  # Return formatted JSON for unhandled structures
+
 
 def format_excel_file(filename):
     wb = load_workbook(filename)
@@ -145,6 +161,8 @@ def format_excel_file(filename):
     epic_header_pattern = re.compile(r'.+\(NOOPT-\d+\)$')
     
     done_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")  # Pastel green
+    sub_task_spacer_fill = PatternFill(start_color="DCDCDC", end_color="DCDCDC", fill_type="solid")  # Light Gray
+    white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")  # White
     
     current_row = 1
     logger.info("Formatting rows")
@@ -152,6 +170,7 @@ def format_excel_file(filename):
         first_cell = ws[f'A{current_row}']
         cell_value = str(first_cell.value) if first_cell.value else ""
         row_key = str(ws[f'B{current_row}'].value)
+        logger.info(f'Cell value: {cell_value}')
 
         if epic_header_pattern.match(cell_value): 
             logger.info(f'Found header row: {current_row}')
@@ -169,6 +188,9 @@ def format_excel_file(filename):
                 indent_level = 1
                 row_key = ""
 
+            if ws[f'A{current_row}'].value == "§":
+                indent_level = 3
+                
             logger.debug(f'Indent level: {indent_level} Row: {current_row}')
             if indent_level == 0:  # Task
                 logger.info(f'Task row: {current_row}')
@@ -176,13 +198,18 @@ def format_excel_file(filename):
                 task_cell = ws[f'A{current_row}']
                 task_cell.value = row_key
                 task_cell.alignment = Alignment(horizontal='left', vertical='center')
-            else:  # Sub-Task
+            elif indent_level == 1:  # Sub-Task
                 logger.info(f'Sub-Task row: {current_row}')
                 spacer_cell = ws[f'A{current_row}']
                 spacer_cell.value = ""
+                spacer_cell.fill = sub_task_spacer_fill
                 sub_task_cell = ws[f'B{current_row}']
                 sub_task_cell.value = row_key
                 sub_task_cell.alignment = Alignment(horizontal='left', vertical='center')
+            else:
+                spacer_cell = ws[f'A{current_row}']
+                spacer_cell.value = ""
+                spacer_cell.fill = PatternFill(fill_type=None)
             
             for col in ['C', 'D', 'E', 'F']:
                 cell = ws[f'{col}{current_row}']
@@ -198,12 +225,14 @@ def format_excel_file(filename):
                         ws[f'{col_to_fill}{current_row}'].fill = done_fill
         current_row += 1
     
-    ws.column_dimensions['A'].width = 5  # Spacer column
+    ws.column_dimensions['A'].width = 2  # Spacer column
     ws.column_dimensions['B'].width = 15  # Key column
     ws.column_dimensions['C'].width = 40  # Summary column
     ws.column_dimensions['D'].width = 20  # Status column
     ws.column_dimensions['E'].width = 25  # Comment Date column
-    ws.column_dimensions['F'].width = 150  # Comment column
+    ws.column_dimensions['F'].width = 100  # Comment column
+    
+    ws.delete_cols(7)
     
     wb.save(filename)
 
@@ -362,8 +391,11 @@ def main():
         )
         
         sub_tasks.sort_values(
-            by=["Child Key", "Comment Date"],
-            ascending=[True, False],
+            by=["Child Status", "Comment Date", "Parent"],
+            key=lambda col: (
+                col.map(status_order).fillna(5) if col.name == "Child Status" else col
+            ),
+            ascending=[True, False, True],
             inplace=True
         )
         
@@ -387,12 +419,13 @@ def main():
                 row.get("Indent", 0),
             ])
         
-        excel_data.append(["", "", "", "", "", "", ""]) #Spacer row
+        excel_data.append(["§", "", "", "", "", "", ""]) #Spacer row
     
     # Save to Excel
     timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
     filename = os.path.join(script_dir, f"jira_report_{timestamp}.xlsx")
     df = pd.DataFrame(excel_data)
+
     df.to_excel(filename, index=False, header=False)
     if not getattr(args, 'plain', False): 
         print("Applying formatting...")
