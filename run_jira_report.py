@@ -342,10 +342,14 @@ def format_excel_file(filename):
             task_cell = ws[f'A{row}']
             task_cell.alignment = header_alignment
 
-        def apply_done_style(row):
+        def apply_done_style(row, indent):
             """Applies styles for a row marked as 'Done'."""
-            for col in ['A', 'B', 'C', 'D', 'E', 'F']:
-                ws[f'{col}{row}'].fill = done_fill
+            if indent == 0:
+                for col in ['A', 'B', 'C', 'D', 'E', 'F']:
+                    ws[f'{col}{row}'].fill = done_fill
+            else:
+                for col in ['B', 'C', 'D', 'E', 'F']:
+                    ws[f'{col}{row}'].fill = done_fill
                 
         logger.debug("Formatting rows")
         current_row = 1
@@ -403,8 +407,7 @@ def format_excel_file(filename):
                     
                     if ws[f'D{current_row}'].value and ws[f'D{current_row}'].value.strip() == "Done":
                         logger.debug(f"Applying 'Done' style to row: {current_row}")
-                        for col_to_fill in ['A', 'B', 'C', 'D', 'E', 'F']:
-                            ws[f'{col_to_fill}{current_row}'].fill = done_fill
+                        apply_done_style(current_row, indent_level)
             current_row += 1
 
         logger.info("Deleting unused columns")
