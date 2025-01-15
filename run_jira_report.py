@@ -427,7 +427,7 @@ def process_child_issue(data, epic_key, epic_summary, child_issue):
     child_summary = child_issue["fields"]["summary"]
     child_status = child_issue["fields"]["status"]["name"]
     
-    logger.info(f"Processing child issue: {child_key}")
+    logger.debug(f"Processing child issue: {child_key}")
     most_recent_comment, comment_date = fetch_most_recent_comment(child_key)
     
     data.append({
@@ -534,7 +534,7 @@ def main():
         for i, epic in enumerate(epics["issues"], start=1):
             epic_key = epic["key"]
             epic_summary = epic["fields"]["summary"]
-            logger.info(f"Processing Epic: {epic_key} - {epic_summary}")
+            logger.debug(f"Processing epic: {epic_key} - {epic_summary}")
             
             print(f"[ ] Fetching epics...[{i}/{total_epics}]", end="\r", flush=True)
             
